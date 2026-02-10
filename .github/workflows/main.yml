@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version tag of llama-cpp-python to build: v0.2.81'
-        default: 'v0.2.81'
+        description: 'Version tag of llama-cpp-python to build (e.g., v0.3.8)'
+        default: 'v0.3.8'
         required: true
         type: string
       config:
@@ -14,24 +14,24 @@ on:
         required: false
         type: string
       exclude:
-        description: 'Exclude build configurations: key1-1:item1-1,key1-2:item1-2;key2-1:item2-1,key2-2:item2-2'
+        description: 'Exclude build configurations'
         default: 'None'
         required: false
         type: string
   workflow_call:
     inputs:
       version:
-        description: 'Version tag of llama-cpp-python to build: v0.2.81'
-        default: 'v0.2.81'
+        description: 'Version tag of llama-cpp-python to build'
+        default: 'v0.3.8'
         required: true
         type: string
       config:
-        description: 'Configurations to build: key1:item1-1,item1-2;key2:item2-1,item2-2'
+        description: 'Configurations to build'
         default: 'Default'
         required: false
         type: string
       exclude:
-        description: 'Exclude build configurations: key1-1:item1-1,key1-2:item1-2;key2-1:item2-1,key2-2:item2-2'
+        description: 'Exclude build configurations'
         default: 'None'
         required: false
         type: string
@@ -145,49 +145,68 @@ jobs:
           mamba install -y 'cuda' $cudaChannels.TrimEnd().Split()
           if (!(mamba list cuda)[-1].contains('cuda')) {sleep -s 10; mamba install -y 'cuda' $cudaChannels.TrimEnd().Split()}
           if (!(mamba list cuda)[-1].contains('cuda')) {throw 'CUDA Toolkit failed to install!'}
-          python -m pip install build wheel
           
-      - name: Change Package Name
-        run: |
-          $packageVersion = [version]$env:PCKGVER.TrimStart('v')
-          $pyproject = Get-Content 'pyproject.toml' -raw
-          $cmakelists = Get-Content 'CMakeLists.txt' -raw
- 
-          if ($packageVersion -gt [version]'0.2.13')
-          {
-            $pyScripts = (Get-ChildItem $(Join-Path '.' 'llama_cpp' '*.py'))
-            $pyScripts.fullname.foreach({New-Item $_ -itemType File -value (Get-Content $_ -raw).replace('import llama_cpp.llama','from . import llama') -force})
-          }
+          # UPDATED: Install build backend tools explicitly for scikit-build-core
+          python -m pip install build wheel scikit-build-core cmake ninja
           
       - name: Build Wheel
         run: |
           $packageVersion = [version]$env:PCKGVER.TrimStart('v')
           $cudaVersion = $env:CUDAVER.Remove($env:CUDAVER.LastIndexOf('.')).Replace('.','')
+          
+          # Setup CUDA Environment
           $env:CUDA_PATH = $env:CONDA_PREFIX
           $env:CUDA_HOME = $env:CONDA_PREFIX
           if ($IsLinux) {$env:LD_LIBRARY_PATH = $env:CONDA_PREFIX + '/lib:' + $env:LD_LIBRARY_PATH}
-          $env:VERBOSE = '1'
+          
+          # Define CMAKE Args
+          # -DGGML_CUDA=on : Enable CUDA
+          # -DCMAKE_CUDA_ARCHITECTURES=all : Target all GPU architectures
           $env:CMAKE_ARGS = '-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=all'
-          if ($packageVersion -gt [version]'0.1.68' -and $packageVersion -lt [version]'0.1.71') {$env:CMAKE_ARGS = '-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=35-real;37-real;52;61-real;70-real;72-real;75-real;80-real;86-real;89-real;90'}
-          if ($packageVersion -gt [version]'0.1.68' -and $packageVersion -lt [version]'0.1.71' -and [version]$env:CUDAVER -ge [version]'12.0') {$env:CMAKE_ARGS = '-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=52;61-real;70-real;72-real;75-real;80-real;86-real;89-real;90'}
-          if ($packageVersion -gt [version]'0.1.68' -and $packageVersion -lt [version]'0.1.71' -and [version]$env:CUDAVER -lt [version]'11.8') {$env:CMAKE_ARGS = '-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=35-real;37-real;52;61-real;70-real;72-real;75-real;80-real;86'}
-          if ($packageVersion -gt [version]'0.2.13') {$env:CMAKE_ARGS = "-DLLAMA_NATIVE=off -DLLAMA_CUDA_FORCE_MMQ=ON $env:CMAKE_ARGS"}
-          if ($packageVersion -lt [version]'0.1.66') {$env:CUDAFLAGS = '-arch=all'}
-          if ($env:AVXVER -eq 'AVX') {$env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DLLAMA_AVX2=off -DLLAMA_FMA=off -DLLAMA_F16C=off'; $cputag = 'avx'}
-          if ($env:AVXVER -eq 'basic') {$env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DLLAMA_AVX=off -DLLAMA_AVX2=off -DLLAMA_FMA=off -DLLAMA_F16C=off'; $cputag = 'basic'}
+          
+          # OPTIONAL: Uncomment to enable Flash Attention (recommended for Gemma 3 performance)
+          # $env:CMAKE_ARGS += ' -DGGML_CUDA_FA_ALL_QUANTS=on'
+          
+          # Legacy Args (Keep if you build older versions, can be removed if strictly building >= 0.3.8)
+          if ($packageVersion -lt [version]'0.1.71') {
+             # Old architecture flags logic preserved...
+             if ([version]$env:CUDAVER -ge [version]'12.0') {$env:CMAKE_ARGS = '-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=52;61-real;70-real;72-real;75-real;80-real;86-real;89-real;90'}
+          }
+          
+          # AVX Flags
+          $cputag = ''
+          if ($env:AVXVER -eq 'AVX') {
+             $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DLLAMA_AVX2=off -DLLAMA_FMA=off -DLLAMA_F16C=off'
+             $cputag = 'avx'
+          }
+          if ($env:AVXVER -eq 'basic') {
+             $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DLLAMA_AVX=off -DLLAMA_AVX2=off -DLLAMA_FMA=off -DLLAMA_F16C=off'
+             $cputag = 'basic'
+          }
+
           $buildtag = "+cu$cudaVersion$cputag"
-          if ($packageVersion -lt [version]'0.2.0') {
-            $env:FORCE_CMAKE = '1'
-            python -m build --wheel -C--build-option=egg_info "-C--build-option=--tag-build=$buildtag"
+          
+          # Build with no isolation to ensure it sees the Mamba CUDA env
+          Write-Host "Building version $packageVersion with tag $buildtag..."
+          python -m build --wheel --no-isolation
+          
+          # --- RENAME WHEEL TO ADD TAG ---
+          # We rename the file instead of patching __init__.py because 0.3.x has complex versioning.
+          # This achieves the same result: a wheel with '+cu122' in the filename.
+          $wheelFile = Get-ChildItem dist/*.whl | Select-Object -First 1
+          if ($wheelFile) {
+              $parts = $wheelFile.Name.Split('-')
+              # Format: name-version-python-abi-platform.whl
+              # We want: name-version+tag-python-abi-platform.whl
+              # Note: parts[1] is the version (e.g., 0.3.8)
+              
+              $newVersion = $parts[1] + $buildtag
+              $newName = $parts[0] + '-' + $newVersion + '-' + ($parts[2..($parts.Length-1)] -join '-')
+              
+              Rename-Item $wheelFile.FullName -NewName $newName
+              Write-Host "Renamed wheel to: $newName"
           } else {
-            $initpath = Join-Path '.' 'llama_cpp' '__init__.py' -resolve
-            $initcontent = Get-Content $initpath -raw
-            $regexstr = '(?s)(?<=__version__ \= ")\d+(?:\.\d+)*(?=")'
-            $regexmatch = [Regex]::Matches($initcontent,$regexstr)
-            if (!($regexmatch[0].Success)) {throw '__init__.py parsing failed'}
-            $newinit = $regexmatch[0].Result(('$`' + '$&' + $buildtag + '$'''))
-            New-Item $initpath -itemType File -value $newinit -force
-            python -m build --wheel
+              Write-Error "No wheel file found in dist/"
           }
           
       - name: Upload files to a GitHub release
